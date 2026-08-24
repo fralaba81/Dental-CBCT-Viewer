@@ -11,6 +11,7 @@ import './index.css';
 
 export { default, default as DicomViewer } from './App';
 export type { DicomViewerProps, DicomViewerHandle } from './App';
+export { onViewerEvent } from './core/viewerEvents';
 
 export type {
   MainView,
