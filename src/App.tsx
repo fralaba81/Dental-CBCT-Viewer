@@ -1,9 +1,10 @@
 import { useEffect, useCallback, useRef, useImperativeHandle, forwardRef } from 'react';
 import { ViewerProvider, useViewer } from '@/context/ViewerContext';
+import { ViewerControlProvider, useViewerControl } from '@/context/ViewerControlContext';
 import { I18nProvider, useI18n } from '@/i18n/I18nContext';
 import { ThemeProvider, useTheme } from '@/context/ThemeContext';
 import { initCornerstone } from '@/core/init';
-import { setActiveTool } from '@/core/toolManager';
+import { setActiveTool as setCornerstoneActiveTool } from '@/core/toolManager';
 import { LandingPage } from '@/components/dicom/LandingPage';
 import { DisclaimerBanner } from '@/components/dicom/DisclaimerBanner';
 import { ViewerShell } from '@/components/layout/ViewerShell';
@@ -16,8 +17,22 @@ import { useDicomLoader } from '@/hooks/useDicomLoader';
 import { serializePlan } from '@/core/planIO';
 import { loadSample } from '@/core/sampleLoader';
 import { exportPlanPdf, exportDrillGuideStl } from '@/core/viewerExports';
+import {
+  getMprSnapshot,
+  resetViewerViewport,
+  resizeViewer,
+  setViewportSlice,
+  stepViewportSlice,
+} from '@/core/publicViewerController';
+import { onViewerEvent } from '@/core/viewerEvents';
 import type { PlanData } from '@/core/planIO';
 import type { ViewportTool, ImplantData, LayoutMode, ViewKey } from '@/types/dicom';
+import type {
+  MainView,
+  ViewerApiCallbacks,
+  ViewerPublicState,
+  ViewerViewport,
+} from '@/types/viewerApi';
 
 const SHORTCUT_MAP: Record<string, ViewportTool> = {
   w: 'windowLevel',
@@ -36,6 +51,16 @@ const SHORTCUT_MAP: Record<string, ViewportTool> = {
   x: 'crosshairs',
 };
 
+function inferMainView(layoutMode: LayoutMode, viewMode: string): MainView {
+  if (layoutMode === 'OPG2+1') return 'panoramic';
+  if (layoutMode === '1x1' && viewMode === '3D') return '3d';
+  return 'mpr';
+}
+
+function toMprViewport(viewport?: ViewerViewport): 'axial' | 'coronal' | 'sagittal' {
+  return viewport === 'coronal' || viewport === 'sagittal' ? viewport : 'axial';
+}
+
 // ── Public component props / imperative handle ──────────────────
 
 export interface DicomViewerProps {
@@ -52,6 +77,8 @@ export interface DicomViewerProps {
   onPlanChange?: (plan: PlanData) => void;
   /** Called whenever the implant list changes. */
   onImplantsChange?: (implants: ImplantData[]) => void;
+  /** Host integration callbacks for mobile/custom frontends. */
+  callbacks?: ViewerApiCallbacks;
   /** Extra class name on the root element. */
   className?: string;
   /** Embed mode — the host owns page-level consent, so the built-in
@@ -67,9 +94,27 @@ export interface DicomViewerHandle {
   getPlan(): PlanData;
   loadPlan(plan: PlanData): void;
   loadStudy(files: File[]): Promise<void>;
+  unloadStudy(): void;
   loadSample(): Promise<void>;
   setLayout(mode: LayoutMode): void;
   setActiveView(view: ViewKey): void;
+  setMainView(view: MainView): void;
+  maximizeViewport(viewport: ViewerViewport): void;
+  restoreLayout(): void;
+  openArchEditor(): void;
+  closeArchEditor(): void;
+  openCrossSections(): void;
+  closeCrossSections(): void;
+  setActiveTool(tool: ViewportTool): void;
+  resetView(viewport?: ViewerViewport): void;
+  nextSlice(viewport?: ViewerViewport): void;
+  previousSlice(viewport?: ViewerViewport): void;
+  setSlice(index: number, viewport?: ViewerViewport): void;
+  setCrossSection(index: number, count?: number): void;
+  nextCrossSection(step?: number): void;
+  previousCrossSection(step?: number): void;
+  getViewerState(): ViewerPublicState;
+  resize(): void;
   exportPdf(): Promise<void>;
   exportGuideStl(): Promise<boolean>;
 }
@@ -82,20 +127,55 @@ function ViewerApp({
   handleRef: React.Ref<DicomViewerHandle>;
 }) {
   const { state, dispatch } = useViewer();
+  const control = useViewerControl();
   const { t, lang, setLang } = useI18n();
   const { theme } = useTheme();
   const { loadFiles } = useDicomLoader();
 
-  // Latest state for the imperative handle (avoids stale closures without
-  // rebuilding the handle every render).
   const stateRef = useRef(state);
   stateRef.current = state;
+  const controlRef = useRef(control);
+  controlRef.current = control;
+  const previousStudyRef = useRef(false);
+  const previousMainViewRef = useRef<MainView>(inferMainView(state.layoutMode, state.viewMode));
+  const previousToolRef = useRef(state.activeTool);
+  const previousArchRef = useRef(state.archCurveControlPoints);
+  const previousCrossSectionRef = useRef(state.crossSectionPosition);
 
   const planMeta = () => ({
     savedAt: new Date().toISOString(),
     studyInstanceUID: stateRef.current.study?.studyInstanceUID ?? null,
     patientId: stateRef.current.study?.patientId ?? null,
   });
+
+  const buildPublicState = useCallback((): ViewerPublicState => {
+    const current = stateRef.current;
+    const controls = controlRef.current;
+    const slices = getMprSnapshot();
+    const progress = current.loadProgress && current.loadProgress.total > 0
+      ? current.loadProgress.loaded / current.loadProgress.total
+      : current.isLoading ? 0 : 1;
+    return {
+      studyLoaded: Boolean(current.study),
+      mainView: inferMainView(current.layoutMode, current.viewMode),
+      maximizedViewport: controls.maximizedViewport,
+      currentSlices: {
+        axial: slices.axial.index,
+        coronal: slices.coronal.index,
+        sagittal: slices.sagittal.index,
+      },
+      sliceCounts: {
+        axial: slices.axial.total,
+        coronal: slices.coronal.total,
+        sagittal: slices.sagittal.total,
+      },
+      currentTool: current.activeTool,
+      loading: current.isLoading,
+      loadingProgress: Math.max(0, Math.min(1, progress)),
+      archEditorOpen: controls.archEditorOpen,
+      crossSectionsOpen: controls.crossSectionsOpen,
+    };
+  }, []);
 
   const openSample = useCallback(async () => {
     const { study, volumeId, windowLevel } = await loadSample();
@@ -112,12 +192,150 @@ function ViewerApp({
     getPlan: () => serializePlan(stateRef.current, planMeta()),
     loadPlan: (plan) => dispatch({ type: 'LOAD_PLAN', payload: plan }),
     loadStudy: (files) => loadFiles(files),
+    unloadStudy: () => {
+      controlRef.current.setMaximizedViewport(null);
+      controlRef.current.setArchEditorOpen(false);
+      controlRef.current.setCrossSectionsOpen(false);
+      dispatch({ type: 'RESET' });
+    },
     loadSample: openSample,
     setLayout: (mode) => dispatch({ type: 'SET_LAYOUT_MODE', payload: mode }),
     setActiveView: (view) => dispatch({ type: 'SET_VIEW_MODE', payload: view }),
+    setMainView: (view) => {
+      controlRef.current.setMaximizedViewport(null);
+      if (view === 'panoramic') {
+        dispatch({ type: 'SET_LAYOUT_MODE', payload: 'OPG2+1' });
+      } else if (view === '3d') {
+        dispatch({ type: 'SET_LAYOUT_MODE', payload: '1x1' });
+        dispatch({ type: 'SET_VIEW_MODE', payload: '3D' });
+      } else {
+        dispatch({ type: 'SET_LAYOUT_MODE', payload: '1+3' });
+        dispatch({
+          type: 'SET_PANEL',
+          payload: { big: 'AXIAL', small: ['CORONAL', 'SAGITTAL', '3D'] },
+        });
+      }
+    },
+    maximizeViewport: (viewport) => {
+      controlRef.current.setMaximizedViewport(viewport);
+      props.callbacks?.onViewportMaximized?.(viewport);
+    },
+    restoreLayout: () => {
+      controlRef.current.setMaximizedViewport(null);
+      props.callbacks?.onViewportRestored?.();
+      queueMicrotask(resizeViewer);
+    },
+    openArchEditor: () => {
+      controlRef.current.setArchEditorOpen(true);
+      dispatch({ type: 'SET_LAYOUT_MODE', payload: 'OPG2+1' });
+    },
+    closeArchEditor: () => controlRef.current.setArchEditorOpen(false),
+    openCrossSections: () => {
+      controlRef.current.setCrossSectionsOpen(true);
+      dispatch({ type: 'SET_LAYOUT_MODE', payload: 'OPG2+1' });
+    },
+    closeCrossSections: () => controlRef.current.setCrossSectionsOpen(false),
+    setActiveTool: (tool) => {
+      setCornerstoneActiveTool(tool);
+      dispatch({ type: 'SET_ACTIVE_TOOL', payload: tool });
+    },
+    resetView: (viewport) => resetViewerViewport(viewport),
+    nextSlice: (viewport) => stepViewportSlice(toMprViewport(viewport), 1),
+    previousSlice: (viewport) => stepViewportSlice(toMprViewport(viewport), -1),
+    setSlice: (index, viewport) => setViewportSlice(toMprViewport(viewport), index),
+    setCrossSection: (index, count = 101) => {
+      const safeCount = Math.max(2, Math.round(count));
+      const normalized = Math.max(0, Math.min(1, index / (safeCount - 1)));
+      dispatch({ type: 'SET_CROSS_SECTION_POSITION', payload: normalized });
+    },
+    nextCrossSection: (step = 0.01) => dispatch({
+      type: 'SET_CROSS_SECTION_POSITION',
+      payload: Math.min(1, stateRef.current.crossSectionPosition + Math.abs(step)),
+    }),
+    previousCrossSection: (step = 0.01) => dispatch({
+      type: 'SET_CROSS_SECTION_POSITION',
+      payload: Math.max(0, stateRef.current.crossSectionPosition - Math.abs(step)),
+    }),
+    getViewerState: buildPublicState,
+    resize: resizeViewer,
     exportPdf: () => exportPlanPdf(stateRef.current, t, lang),
     exportGuideStl: () => exportDrillGuideStl(stateRef.current).then((r) => r.ok),
-  }), [dispatch, loadFiles, openSample, t, lang]);
+  }), [dispatch, loadFiles, openSample, t, lang, buildPublicState, props.callbacks]);
+
+  // ── Host events ────────────────────────────────────────────
+  useEffect(() => {
+    const loaded = Boolean(state.study);
+    if (loaded !== previousStudyRef.current) {
+      loaded ? props.callbacks?.onStudyLoaded?.() : props.callbacks?.onStudyUnloaded?.();
+      previousStudyRef.current = loaded;
+    }
+  }, [state.study, props.callbacks]);
+
+  useEffect(() => {
+    const view = inferMainView(state.layoutMode, state.viewMode);
+    if (view !== previousMainViewRef.current) {
+      previousMainViewRef.current = view;
+      props.callbacks?.onMainViewChanged?.(view);
+    }
+  }, [state.layoutMode, state.viewMode, props.callbacks]);
+
+  useEffect(() => {
+    if (state.activeTool !== previousToolRef.current) {
+      previousToolRef.current = state.activeTool;
+      props.callbacks?.onToolChanged?.(state.activeTool);
+    }
+  }, [state.activeTool, props.callbacks]);
+
+  useEffect(() => {
+    if (state.archCurveControlPoints !== previousArchRef.current) {
+      previousArchRef.current = state.archCurveControlPoints;
+      props.callbacks?.onArchChanged?.();
+    }
+  }, [state.archCurveControlPoints, props.callbacks]);
+
+  useEffect(() => {
+    if (state.crossSectionPosition !== previousCrossSectionRef.current) {
+      previousCrossSectionRef.current = state.crossSectionPosition;
+      props.callbacks?.onCrossSectionChanged?.(state.crossSectionPosition);
+    }
+  }, [state.crossSectionPosition, props.callbacks]);
+
+  useEffect(() => {
+    const progress = state.loadProgress && state.loadProgress.total > 0
+      ? state.loadProgress.loaded / state.loadProgress.total
+      : state.isLoading ? 0 : 1;
+    props.callbacks?.onLoadingProgress?.(Math.max(0, Math.min(1, progress)));
+  }, [state.loadProgress, state.isLoading, props.callbacks]);
+
+  useEffect(() => {
+    if (state.error) props.callbacks?.onError?.(state.error);
+  }, [state.error, props.callbacks]);
+
+  useEffect(() => {
+    props.callbacks?.onStateChange?.(buildPublicState());
+  }, [
+    state.study,
+    state.layoutMode,
+    state.viewMode,
+    state.activeTool,
+    state.isLoading,
+    state.loadProgress,
+    state.archCurveControlPoints,
+    state.crossSectionPosition,
+    control.maximizedViewport,
+    control.archEditorOpen,
+    control.crossSectionsOpen,
+    props.callbacks,
+    buildPublicState,
+  ]);
+
+  useEffect(() => onViewerEvent<{ viewport: 'axial' | 'coronal' | 'sagittal'; index: number; total: number }>(
+    'sliceChanged',
+    ({ viewport, index, total }) => {
+      props.callbacks?.onSliceChanged?.(viewport, index, total);
+      props.callbacks?.onStateChange?.(buildPublicState());
+    },
+  ), [props.callbacks, buildPublicState]);
 
   // ── Prop → state wiring ─────────────────────────────────────
   const appliedInitial = useRef(false);
@@ -132,13 +350,11 @@ function ViewerApp({
     if (props.lang && props.lang !== lang) setLang(props.lang as Parameters<typeof setLang>[0]);
   }, [props.lang, lang, setLang]);
 
-  // Notify the host when the implant list changes.
   const onImplants = props.onImplantsChange;
   useEffect(() => {
     onImplants?.(state.implants);
   }, [state.implants, onImplants]);
 
-  // Notify the host (debounced) when the plan changes.
   const onPlan = props.onPlanChange;
   useEffect(() => {
     if (!onPlan) return;
@@ -149,13 +365,12 @@ function ViewerApp({
     state.crossSectionPosition, state.crossSectionTiltDeg, state.safety, state.report, state.guide,
   ]);
 
-  // Keyboard shortcuts
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const tool = SHORTCUT_MAP[e.key.toLowerCase()];
       if (tool) {
-        setActiveTool(tool);
+        setCornerstoneActiveTool(tool);
         dispatch({ type: 'SET_ACTIVE_TOOL', payload: tool });
       }
     },
@@ -210,8 +425,6 @@ function ViewerApp({
     content = <ViewerShell />;
   }
 
-  // The `dark` class lives on the viewer's own root (dcv-root) — never on
-  // <html> — so an embedded viewer never toggles the host page's theme.
   return (
     <div className={`dcv-root ${theme === 'dark' ? 'dark' : ''} ${props.className ?? ''} h-full w-full`}>
       <div className="flex flex-col h-full w-full overflow-hidden bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
@@ -227,16 +440,14 @@ function ViewerApp({
   );
 }
 
-/**
- * Embeddable Dental CBCT Viewer. Render it (optionally with a ref for the
- * imperative API) and import `dental-cbct-viewer/style.css` once.
- */
 const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>((props, ref) => {
   return (
     <I18nProvider>
       <ThemeProvider>
         <ViewerProvider>
-          <ViewerApp props={props} handleRef={ref} />
+          <ViewerControlProvider>
+            <ViewerApp props={props} handleRef={ref} />
+          </ViewerControlProvider>
         </ViewerProvider>
       </ThemeProvider>
     </I18nProvider>
