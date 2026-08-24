@@ -11,6 +11,15 @@ import './index.css';
 
 export { default, default as DicomViewer } from './App';
 export type { DicomViewerProps, DicomViewerHandle } from './App';
+export { onViewerEvent } from './core/viewerEvents';
+
+export type {
+  MainView,
+  ViewerViewport,
+  ViewerSliceState,
+  ViewerPublicState,
+  ViewerApiCallbacks,
+} from './types/viewerApi';
 
 // Re-export the public data model + catalog so the common types are reachable
 // straight from the main entry as well (they are also under `/core`).

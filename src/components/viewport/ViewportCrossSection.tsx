@@ -15,8 +15,6 @@ interface ViewportCrossSectionProps {
 
 const CROSS_SECTION_WIDTH_MM = 50;
 
-// ── Canvas W/L rendering (same algo as ViewportPanoramic) ─────
-
 function renderToCanvas(
   canvas: HTMLCanvasElement,
   pixelData: Float32Array,
@@ -84,8 +82,6 @@ function getContentRect(container: HTMLElement, canvas: HTMLCanvasElement) {
   return { left: (cw - rw) / 2, top: (ch - rh) / 2, width: rw, height: rh };
 }
 
-// ── Component ──────────────────────────────────────────────────
-
 export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
   const { state, dispatch } = useViewer();
   const { t } = useI18n();
@@ -94,23 +90,25 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
   const resultRef = useRef<CrossSectionResult | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [computing, setComputing] = useState(false);
-  // Shared window/level (preset buttons + W/L drag all flow through context)
   const wc = state.windowLevel.wc;
   const ww = state.windowLevel.ww;
   const wcRef = useRef(wc);
   const wwRef = useRef(ww);
   const [csResult, setCsResult] = useState<CrossSectionResult | null>(null);
 
-  // Keep refs in sync for use in debounced callbacks
   wcRef.current = wc;
   wwRef.current = ww;
 
-  // Axial Z indicator line
   const [lineTop, setLineTop] = useState<number | null>(null);
   const [lineDragging, setLineDragging] = useState(false);
-
-  // W/L drag
   const wlDragRef = useRef<{ startX: number; startY: number; startWc: number; startWw: number } | null>(null);
+  const touchSwipeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startPosition: number;
+    moved: boolean;
+  } | null>(null);
 
   const renderCurrent = useCallback(() => {
     const r = resultRef.current;
@@ -121,7 +119,6 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
 
   useEffect(() => { renderCurrent(); }, [renderCurrent]);
 
-  // Generate cross-section (debounced, fast)
   useEffect(() => {
     if (!volumeId || !state.archCurveControlPoints) return;
 
@@ -147,15 +144,11 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
         }
       }
       setComputing(false);
-    }, 100); // shorter debounce — cross-section is fast
+    }, 100);
 
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [volumeId, state.archCurveControlPoints, state.crossSectionPosition, state.crossSectionTiltDeg, state.panoramicResolution]);
 
-  // ── Z line sync ─────────────────────────────────────────────
-
-  // When tilted, image rows run along the leaned slice axis: row v maps to
-  // world z = zMid + v·cos(tilt), so the z ↔ row conversion needs the cos factor
   const zToContainerY = useCallback((z: number): number | null => {
     const r = resultRef.current;
     const canvas = canvasRef.current;
@@ -200,7 +193,6 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
     vp.render();
   }, []);
 
-  // Track axial Z
   useEffect(() => {
     const engine = getRenderingEngine(RENDERING_ENGINE_ID);
     const vp = engine?.getViewport(VP_AXIAL);
@@ -219,7 +211,6 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
     return () => el.removeEventListener(Enums.Events.CAMERA_MODIFIED, handler);
   }, [zToContainerY]);
 
-  // Update line after recompute
   useEffect(() => {
     const engine = getRenderingEngine(RENDERING_ENGINE_ID);
     const vp = engine?.getViewport(VP_AXIAL);
@@ -228,16 +219,17 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
     setLineTop(zToContainerY(z));
   }, [computing, zToContainerY]);
 
-  // Z line drag
   const handleLinePointerDown = useCallback((e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* optional */ }
     setLineDragging(true);
   }, []);
 
   useEffect(() => {
     if (!lineDragging) return;
     const handleMove = (e: PointerEvent) => {
+      e.preventDefault();
       const z = containerYToZ(e.clientY);
       if (z !== null) {
         setAxialSliceZ(z);
@@ -245,24 +237,53 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
       }
     };
     const handleUp = () => setLineDragging(false);
-    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointermove', handleMove, { passive: false });
     window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
     return () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
   }, [lineDragging, containerYToZ, setAxialSliceZ, zToContainerY]);
 
-  // ── W/L pointer drag ────────────────────────────────────────
-
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
-    // Don't start W/L drag while implant placement mode is active
     if (state.implantPlacementMode) return;
-    wlDragRef.current = { startX: e.clientX, startY: e.clientY, startWc: wc, startWw: ww };
-  }, [wc, ww, state.implantPlacementMode]);
 
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (e.pointerType === 'touch') {
+      touchSwipeRef.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        startPosition: state.crossSectionPosition,
+        moved: false,
+      };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* optional */ }
+      return;
+    }
+
+    wlDragRef.current = { startX: e.clientX, startY: e.clientY, startWc: wc, startWw: ww };
+  }, [wc, ww, state.implantPlacementMode, state.crossSectionPosition]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const touch = touchSwipeRef.current;
+    if (touch && touch.pointerId === e.pointerId) {
+      const dx = e.clientX - touch.startX;
+      const dy = e.clientY - touch.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) touch.moved = true;
+      if (!touch.moved || Math.abs(dx) < Math.abs(dy)) return;
+
+      e.preventDefault();
+      const width = Math.max(180, containerRef.current?.clientWidth ?? 320);
+      // A full-width horizontal drag traverses roughly half the dental arch,
+      // giving precise finger control without requiring tiny buttons.
+      const delta = -(dx / width) * 0.5;
+      const position = Math.max(0, Math.min(1, touch.startPosition + delta));
+      dispatch({ type: 'SET_CROSS_SECTION_POSITION', payload: position });
+      return;
+    }
+
     const d = wlDragRef.current;
     if (!d) return;
     dispatch({
@@ -274,7 +295,10 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
     });
   }, [dispatch]);
 
-  const handlePointerUp = useCallback(() => { wlDragRef.current = null; }, []);
+  const handlePointerUp = useCallback((e?: React.PointerEvent<HTMLDivElement>) => {
+    if (e && touchSwipeRef.current?.pointerId === e.pointerId) touchSwipeRef.current = null;
+    wlDragRef.current = null;
+  }, []);
 
   return (
     <div
@@ -282,22 +306,22 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
       data-crosssection-view
       data-vp="CROSS"
       data-vp-title={t('viewport.crossSection')}
-      className="relative w-full h-full bg-black overflow-hidden select-none"
-      style={state.implantPlacementMode ? { cursor: 'crosshair' } : undefined}
+      className="relative w-full h-full bg-black overflow-hidden select-none touch-none"
+      style={{ ...(state.implantPlacementMode ? { cursor: 'crosshair' } : {}), touchAction: 'none' }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerLeave={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onPointerLeave={(e) => { if (e.pointerType !== 'touch') handlePointerUp(e); }}
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas
         ref={canvasRef}
         data-crosssection-canvas
         className="w-full h-full"
-        style={{ objectFit: 'contain', imageRendering: 'auto' }}
+        style={{ objectFit: 'contain', imageRendering: 'auto', touchAction: 'none' }}
       />
 
-      {/* Measurement drawing & display */}
       <CanvasMeasurementOverlay
         containerRef={containerRef}
         canvasRef={canvasRef}
@@ -315,48 +339,40 @@ export function ViewportCrossSection({ volumeId }: ViewportCrossSectionProps) {
         }}
       />
 
-
-      {/* Axial Z indicator line */}
       {lineTop !== null && (
         <div
           className="absolute left-0 right-0"
-          style={{ top: `${lineTop}px`, height: '11px', marginTop: '-5.5px', cursor: 'ns-resize', pointerEvents: 'auto', zIndex: 20 }}
+          style={{ top: `${lineTop}px`, height: '30px', marginTop: '-15px', cursor: 'ns-resize', pointerEvents: 'auto', zIndex: 20, touchAction: 'none' }}
           onPointerDown={handleLinePointerDown}
         >
-          <div className="w-full" style={{ height: '1px', marginTop: '5px', background: 'rgba(255, 255, 50, 0.6)', boxShadow: '0 0 4px rgba(255, 255, 50, 0.4)' }} />
+          <div className="w-full" style={{ height: '1px', marginTop: '15px', background: 'rgba(255, 255, 50, 0.6)', boxShadow: '0 0 4px rgba(255, 255, 50, 0.4)' }} />
         </div>
       )}
 
-      {/* Label */}
       <OrientationLabel text={t('viewport.crossSection')} viewKey="CROSS" />
 
-      {/* Tilt info */}
       {state.crossSectionTiltDeg !== 0 && (
         <div className="absolute top-5 left-1/2 -translate-x-1/2 text-gray-400 text-[10px] font-mono pointer-events-none select-none [text-shadow:_0_1px_2px_rgb(0_0_0_/_80%)]">
           {t('viewport.tilt', { deg: state.crossSectionTiltDeg.toFixed(0) })}
         </div>
       )}
 
-      {/* W/L info */}
       <div className="absolute bottom-1 left-2 text-gray-400 text-[10px] font-mono pointer-events-none select-none [text-shadow:_0_1px_2px_rgb(0_0_0_/_80%)]">
         WC: {Math.round(wc)} / WW: {Math.round(ww)}
       </div>
 
       <ComputingOverlay show={computing} />
 
-      {/* Implant placement mode indicator */}
       {state.implantPlacementMode && (
         <div className="absolute top-1 right-2 text-yellow-400 text-xs font-mono font-bold pointer-events-none select-none animate-pulse [text-shadow:_0_1px_2px_rgb(0_0_0_/_80%)]">
           {t('viewport.placeImplantHint')}
         </div>
       )}
 
-      {/* Placement mode border glow */}
       {state.implantPlacementMode && (
         <div className="absolute inset-0 pointer-events-none border-2 border-yellow-400/50 rounded" style={{ zIndex: 30 }} />
       )}
 
-      {/* Implant overlay */}
       {csResult && (
         <ImplantOverlay
           containerRef={containerRef}

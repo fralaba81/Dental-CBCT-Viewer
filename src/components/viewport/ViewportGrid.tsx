@@ -1,4 +1,5 @@
 import { useViewer } from '@/context/ViewerContext';
+import { useViewerControl } from '@/context/ViewerControlContext';
 import { normalizePanelViews, type ViewKey } from '@/types/dicom';
 import { Viewport2D } from './Viewport2D';
 import { ViewportMPR } from './ViewportMPR';
@@ -10,12 +11,46 @@ import { ImplantAxialOverlay } from '@/components/implant/ImplantAxialOverlay';
 import { Viewport1x1Chrome } from './Viewport1x1Chrome';
 import { PanoramaChrome } from './PanoramaChrome';
 
-export function ViewportGrid() {
+export function ViewportGrid({ headless = false }: { headless?: boolean }) {
   const { state } = useViewer();
+  const { maximizedViewport, archEditorOpen, crossSectionsOpen } = useViewerControl();
   const vid = state.volumeId;
 
-  // 1×1 mode: the selected view + on-image Tools / View boxes; the axial view
-  // also shows the implant / anatomy markers so they are visible here too.
+  // Public/mobile API maximization is intentionally independent from the
+  // underlying layout mode. This preserves the current study/volume state and
+  // lets the host restore the previous layout without reloading DICOM data.
+  if (maximizedViewport && vid) {
+    if (maximizedViewport === '3d') {
+      return <Viewport3D volumeId={vid} />;
+    }
+    if (maximizedViewport === 'panoramic') {
+      return (
+        <div className="relative w-full h-full">
+          <ViewportPanoramic volumeId={vid} showCrossSectionLine />
+          {!headless && <PanoramaChrome />}
+        </div>
+      );
+    }
+    if (maximizedViewport === 'crossSection') {
+      return <ViewportCrossSection volumeId={vid} />;
+    }
+
+    const orientation = maximizedViewport === 'axial'
+      ? 'AXIAL'
+      : maximizedViewport === 'coronal'
+        ? 'CORONAL'
+        : 'SAGITTAL';
+
+    return (
+      <div className="relative w-full h-full">
+        <ViewportMPR orientation={orientation} volumeId={vid} />
+        {orientation === 'AXIAL' && <ImplantAxialOverlay />}
+      </div>
+    );
+  }
+
+  // 1×1 mode: the selected view. In headless mode the host frontend owns all
+  // chrome, so the engine renders only medical content.
   if (state.layoutMode === '1x1') {
     if (!vid) return <Viewport2D />;
     return (
@@ -24,13 +59,58 @@ export function ViewportGrid() {
           ? <Viewport3D volumeId={vid} />
           : <ViewportMPR orientation={state.viewMode} volumeId={vid} />}
         {state.viewMode === 'AXIAL' && <ImplantAxialOverlay />}
-        <Viewport1x1Chrome />
+        {!headless && <Viewport1x1Chrome />}
       </div>
     );
   }
 
   // Multi-viewport layouts need a volume
   if (!vid) return <Viewport2D />;
+
+  // External/mobile frontend: the public `mpr` mode is a true three-plane MPR
+  // layout (Axial large on top, Coronal + Sagittal below). The real Cornerstone
+  // viewports remain mounted inside this single engine instance.
+  if (headless && state.layoutMode === '1+3') {
+    return (
+      <div className="flex flex-col w-full h-full gap-px bg-gray-700">
+        <div className="relative h-3/5 min-h-0">
+          <ViewportMPR orientation="AXIAL" volumeId={vid} />
+          <ImplantAxialOverlay />
+        </div>
+        <div className="flex flex-1 min-h-0 gap-px">
+          <div className="flex-1 min-w-0 min-h-0">
+            <ViewportMPR orientation="CORONAL" volumeId={vid} />
+          </div>
+          <div className="flex-1 min-w-0 min-h-0">
+            <ViewportMPR orientation="SAGITTAL" volumeId={vid} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // External/mobile panoramic flow: the host UI decides whether the user is
+  // viewing the panorama, editing the real dental arch, or browsing the real
+  // perpendicular cross-sections. No fake geometry is drawn by the frontend.
+  if (headless && state.layoutMode === 'OPG2+1') {
+    if (archEditorOpen) {
+      return (
+        <div className="relative w-full h-full">
+          <ViewportMPR orientation="AXIAL" volumeId={vid} />
+          <ArchCurveEditor />
+          <ImplantAxialOverlay />
+        </div>
+      );
+    }
+    if (crossSectionsOpen) {
+      return <ViewportCrossSection volumeId={vid} />;
+    }
+    return (
+      <div className="relative w-full h-full">
+        <ViewportPanoramic volumeId={vid} showCrossSectionLine />
+      </div>
+    );
+  }
 
   // 2×2 — used by the registration flow (four equal MPR/3D panes)
   if (state.layoutMode === '2x2') {

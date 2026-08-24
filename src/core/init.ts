@@ -6,10 +6,8 @@ import {
   type Types,
 } from '@cornerstonejs/core';
 import { init as csToolsInit } from '@cornerstonejs/tools';
-// Static import of pre-bundled dicom-image-loader (fast, single file).
-// We do NOT call its init() because its internal worker URL is
-// incompatible with Vite's dep pre-bundling.
 import * as dicomImageLoader from '@cornerstonejs/dicom-image-loader';
+import DecodeImageFrameWorker from '../workers/decodeImageFrameWorker.ts?worker&inline';
 
 let initialized = false;
 
@@ -18,22 +16,23 @@ export async function initCornerstone(): Promise<void> {
 
   console.log('[DQ-DICOM] Initializing...');
 
-  // 1. Core + Tools (synchronous)
+  // 1. Core + Tools
   csRenderInit();
   csToolsInit();
 
-  // 2. Register wadouri/wadors loaders with cornerstone
+  // 2. Register wadouri/wadors loaders with Cornerstone.
   dicomImageLoader.wadouri.register();
   dicomImageLoader.wadors.register();
 
   // 3. Register the decode worker manually.
-  //    We use a thin wrapper in src/workers/ so Vite transforms the file
-  //    and resolves bare imports (e.g. 'comlink') that browsers cannot handle.
+  //
+  // `?worker&inline` is deliberate: Dental-CBCT-Viewer is consumed as a
+  // library by another Vite application. Emitting a separate worker asset from
+  // the library caused the consumer bundler to treat the generated worker path
+  // as a new entry module. Inlining keeps the worker self-contained inside the
+  // package while still running it in a real Web Worker at runtime.
   const workerFn = () => {
-    const w = new Worker(
-      new URL('../workers/decodeImageFrameWorker.ts', import.meta.url),
-      { type: 'module' },
-    );
+    const w = new DecodeImageFrameWorker();
     w.onerror = (e) => console.error('[DQ-DICOM] Worker load error:', e);
     return w;
   };
@@ -47,7 +46,7 @@ export async function initCornerstone(): Promise<void> {
     maxWorkerInstances: maxWorkers,
   });
 
-  // 4. Register streaming volume loader for MPR
+  // 4. Register streaming volume loader for MPR.
   volumeLoader.registerVolumeLoader(
     'cornerstoneStreamingImageVolume',
     cornerstoneStreamingImageVolumeLoader as unknown as Types.VolumeLoaderFn,

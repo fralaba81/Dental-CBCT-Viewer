@@ -6,3 +6,21 @@
   width: 100%;
   height: 100%;
 }
+
+/*
+ * CBCT viewports are gesture surfaces, not page-scrolling surfaces. This keeps
+ * iOS/Android from stealing one-finger, pinch and multi-touch interactions
+ * from Cornerstone/vtk while the host UI remains free to scroll elsewhere.
+ */
+.dcv-root [data-vp] {
+  touch-action: none;
+  overscroll-behavior: contain;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.dcv-root [data-vp] canvas,
+.dcv-root [data-vp] svg {
+  touch-action: none;
+}

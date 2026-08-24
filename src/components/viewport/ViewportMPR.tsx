@@ -2,6 +2,9 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { getRenderingEngine, Enums, setVolumesForViewports, utilities } from '@cornerstonejs/core';
 import { setupTools, addViewportToToolGroup } from '@/core/toolManager';
 import { RENDERING_ENGINE_ID, VP_AXIAL, VP_SAGITTAL, VP_CORONAL } from '@/core/constants';
+import { emitViewerEvent } from '@/core/viewerEvents';
+import { resetViewerViewport } from '@/core/publicViewerController';
+import { saveViewportState, restoreViewportState } from '@/core/viewportStateRegistry';
 import { VIEW_LABEL_KEYS, type MPROrientation } from '@/types/dicom';
 import { useI18n } from '@/i18n/I18nContext';
 import { ViewportOverlay } from './ViewportOverlay';
@@ -25,6 +28,12 @@ const ORIENTATION_ENUM: Record<MPROrientation, Enums.OrientationAxis> = {
   CORONAL: Enums.OrientationAxis.CORONAL,
 };
 
+const API_VIEW_MAP: Record<MPROrientation, 'axial' | 'sagittal' | 'coronal'> = {
+  AXIAL: 'axial',
+  SAGITTAL: 'sagittal',
+  CORONAL: 'coronal',
+};
+
 export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
   const { t } = useI18n();
   const elementRef = useRef<HTMLDivElement>(null);
@@ -32,15 +41,25 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
   const destroyedRef = useRef(false);
   const [sliceIndex, setSliceIndex] = useState(0);
   const [totalSlices, setTotalSlices] = useState(0);
+  const touchStartRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
+  const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
 
   const viewportId = VP_ID_MAP[orientation];
+  const apiViewport = API_VIEW_MAP[orientation];
+
+  const publishSlice = useCallback((index: number, total: number) => {
+    emitViewerEvent('sliceChanged', {
+      viewport: apiViewport,
+      index,
+      total,
+    });
+  }, [apiViewport]);
 
   const handleResize = useCallback(() => {
     const engine = getRenderingEngine(RENDERING_ENGINE_ID);
     engine?.resize(true, false);
   }, []);
 
-  // Enable the viewport element on mount
   useEffect(() => {
     const element = elementRef.current;
     const engine = getRenderingEngine(RENDERING_ENGINE_ID);
@@ -60,7 +79,6 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
     addViewportToToolGroup(viewportId, RENDERING_ENGINE_ID);
     enabledRef.current = true;
 
-    // Track slice changes via VOLUME_NEW_IMAGE
     const onVolumeNewImage = () => {
       const vp = engine.getViewport(viewportId);
       if (vp && 'getSliceIndex' in vp) {
@@ -68,9 +86,15 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
         const total = (vp as { getNumberOfSlices: () => number }).getNumberOfSlices();
         setSliceIndex(idx);
         setTotalSlices(total);
+        publishSlice(idx, total);
       }
     };
     element.addEventListener(Enums.Events.VOLUME_NEW_IMAGE, onVolumeNewImage);
+
+    const onCameraModified = () => {
+      emitViewerEvent('crosshairChanged', { viewport: apiViewport });
+    };
+    element.addEventListener(Enums.Events.CAMERA_MODIFIED, onCameraModified);
 
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(element);
@@ -78,9 +102,12 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
     return () => {
       destroyedRef.current = true;
       element.removeEventListener(Enums.Events.VOLUME_NEW_IMAGE, onVolumeNewImage);
+      element.removeEventListener(Enums.Events.CAMERA_MODIFIED, onCameraModified);
       resizeObserver.disconnect();
       if (enabledRef.current) {
         try {
+          const currentViewport = engine.getViewport(viewportId);
+          saveViewportState(viewportId, currentViewport);
           engine.disableElement(viewportId);
         } catch {
           // engine may already be destroyed
@@ -88,9 +115,8 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
         enabledRef.current = false;
       }
     };
-  }, [viewportId, orientation, handleResize]);
+  }, [viewportId, orientation, handleResize, publishSlice, apiViewport]);
 
-  // Set the volume on this viewport
   useEffect(() => {
     if (!volumeId || !enabledRef.current) return;
 
@@ -106,13 +132,14 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
 
         const viewport = engine!.getViewport(viewportId);
         if (viewport) {
+          restoreViewportState(viewportId, viewport);
           viewport.render();
-          // Set initial slice info
           if ('getSliceIndex' in viewport) {
             const idx = (viewport as { getSliceIndex: () => number }).getSliceIndex();
             const total = (viewport as { getNumberOfSlices: () => number }).getNumberOfSlices();
             setSliceIndex(idx);
             setTotalSlices(total);
+            publishSlice(idx, total);
           }
         }
       } catch (err) {
@@ -127,7 +154,7 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
     return () => {
       cancelled = true;
     };
-  }, [volumeId, viewportId, orientation]);
+  }, [volumeId, viewportId, orientation, publishSlice]);
 
   const handleJumpToSlice = useCallback(
     (targetIndex: number) => {
@@ -135,7 +162,6 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
       if (!engine) return;
       const viewport = engine.getViewport(viewportId);
       if (!viewport || !('setSliceIndex' in viewport)) return;
-      // Calculate delta from current
       const current = (viewport as { getSliceIndex: () => number }).getSliceIndex();
       const delta = targetIndex - current;
       if (delta === 0) return;
@@ -144,15 +170,53 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
     [viewportId],
   );
 
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== 'touch') return;
+    touchStartRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+  }, []);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const start = touchStartRef.current;
+    if (!start || start.pointerId !== e.pointerId) return;
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) start.moved = true;
+  }, []);
+
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    if (!start || start.pointerId !== e.pointerId || start.moved || e.pointerType !== 'touch') return;
+
+    const now = performance.now();
+    const previous = lastTapRef.current;
+    const isDoubleTap = previous
+      && now - previous.time < 320
+      && Math.hypot(e.clientX - previous.x, e.clientY - previous.y) < 28;
+
+    if (isDoubleTap) {
+      lastTapRef.current = null;
+      resetViewerViewport(apiViewport);
+    } else {
+      lastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
+    }
+  }, [apiViewport]);
+
+  const handlePointerCancel = useCallback(() => {
+    touchStartRef.current = null;
+  }, []);
+
   return (
     <div className="relative w-full h-full bg-black" data-vp={orientation} data-vp-title={t(VIEW_LABEL_KEYS[orientation])}>
       <div
         ref={elementRef}
-        className="w-full h-full"
+        className="w-full h-full touch-none select-none"
+        style={{ touchAction: 'none' }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         onContextMenu={(e) => e.preventDefault()}
       />
       <ViewportOverlay sliceIndex={sliceIndex} totalSlices={totalSlices} viewKey={orientation} />
-      {/* Orientation label */}
       <OrientationLabel text={t(VIEW_LABEL_KEYS[orientation])} viewKey={orientation} />
       {totalSlices > 1 && (
         <SliceIndicator
