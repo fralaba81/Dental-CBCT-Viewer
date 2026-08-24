@@ -19,6 +19,12 @@ type Point2 = [number, number];
 
 /** Half-width (mm) of the cross-section indicator drawn on the axial. */
 const CROSS_SECTION_HALF_MM = 25;
+/** Visible control-point radius. */
+const CONTROL_POINT_RADIUS = 7;
+/** Invisible finger hit target around a control point. */
+const CONTROL_POINT_HIT_RADIUS = 18;
+/** Invisible finger hit target around the cross-section line. */
+const CROSS_SECTION_HIT_WIDTH = 30;
 
 /** Nearest arch position (0-1, arc-length uniform) to a world XY point. */
 function nearestArchPosition(controlPoints: Point2[], wx: number, wy: number): number {
@@ -84,7 +90,6 @@ export function ArchCurveEditor() {
     }
   }, [state.archCurveControlPoints, state.volumeId, dispatch]);
 
-  // Get viewport and focal Z
   const getViewport = useCallback(() => {
     const engine = getRenderingEngine(RENDERING_ENGINE_ID);
     return engine?.getViewport(VP_AXIAL) ?? null;
@@ -97,7 +102,6 @@ export function ArchCurveEditor() {
     return cam.focalPoint?.[2] ?? 0;
   }, [getViewport]);
 
-  // Reproject world control points → screen coordinates
   const updateScreen = useCallback(() => {
     const vp = getViewport();
     if (!vp || !state.archCurveControlPoints) return;
@@ -128,10 +132,6 @@ export function ArchCurveEditor() {
       return [c[0], c[1]] as Point2;
     });
 
-    // Cross-section indicator: line through the arch point at the current
-    // cross-section position, running along the buccolingual normal (i.e.
-    // perpendicular to the arch). Tilt is a Z-lean, so it does not change the
-    // in-plane (axial) projection.
     let csA: Point2 | null = null;
     let csB: Point2 | null = null;
     let csMid: Point2 | null = null;
@@ -152,11 +152,12 @@ export function ArchCurveEditor() {
       curvePath: pointsToPath(curveScreen),
       innerPath: pointsToPath(innerScreen),
       outerPath: pointsToPath(outerScreen),
-      csA, csB, csMid,
+      csA,
+      csB,
+      csMid,
     });
   }, [state.archCurveControlPoints, state.panoramicSlabWidth, state.crossSectionPosition, getViewport, getFocalZ]);
 
-  // Re-render on camera changes (pan/zoom/scroll)
   useEffect(() => {
     const vp = getViewport();
     if (!vp) return;
@@ -169,16 +170,14 @@ export function ArchCurveEditor() {
     return () => el.removeEventListener(Enums.Events.CAMERA_MODIFIED, handler);
   }, [updateScreen, getViewport]);
 
-  // ── Drag interaction via window events ────────────────────────
-
   const handlePointerDown = useCallback((idx: number) => (e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    try { (e.currentTarget as SVGElement).setPointerCapture?.(e.pointerId); } catch { /* optional */ }
     setDragIdx(idx);
     dragIdxRef.current = idx;
   }, []);
 
-  // Window-level move & up handlers (attached when dragging)
   useEffect(() => {
     if (dragIdx === null) return;
 
@@ -204,20 +203,21 @@ export function ArchCurveEditor() {
       dragIdxRef.current = null;
     };
 
-    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointermove', handleMove, { passive: false });
     window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
 
     return () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
   }, [dragIdx, state.archCurveControlPoints, dispatch, getViewport]);
-
-  // ── Cross-section indicator drag (moves position along the arch) ──
 
   const handleCsPointerDown = useCallback((e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    try { (e.currentTarget as SVGElement).setPointerCapture?.(e.pointerId); } catch { /* optional */ }
     setCsDragging(true);
     csDraggingRef.current = true;
   }, []);
@@ -227,6 +227,7 @@ export function ArchCurveEditor() {
 
     const handleMove = (e: PointerEvent) => {
       if (!csDraggingRef.current || !containerRef.current || !state.archCurveControlPoints) return;
+      e.preventDefault();
       const vp = getViewport();
       if (!vp) return;
       const rect = containerRef.current.getBoundingClientRect();
@@ -238,70 +239,79 @@ export function ArchCurveEditor() {
       setCsDragging(false);
       csDraggingRef.current = false;
     };
-    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointermove', handleMove, { passive: false });
     window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
     return () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
   }, [csDragging, state.archCurveControlPoints, dispatch, getViewport]);
 
   if (!screenData || !state.archCurveControlPoints) return null;
 
   return (
-    <div ref={containerRef} className="absolute inset-0" style={{ zIndex: 10, pointerEvents: 'none' }}>
-      <svg className="w-full h-full">
-        {/* Slab width lines */}
+    <div
+      ref={containerRef}
+      className="absolute inset-0 touch-none select-none"
+      style={{ zIndex: 10, pointerEvents: 'none', touchAction: 'none' }}
+    >
+      <svg className="w-full h-full" style={{ touchAction: 'none' }}>
         <path d={screenData.innerPath} fill="none" stroke="rgba(255,80,80,0.4)" strokeWidth={1} />
         <path d={screenData.outerPath} fill="none" stroke="rgba(255,80,80,0.4)" strokeWidth={1} />
-
-        {/* Main curve */}
         <path d={screenData.curvePath} fill="none" stroke="rgba(255,80,80,0.85)" strokeWidth={2} />
 
-        {/* Cross-section position indicator — perpendicular to the arch,
-            matching the vertical line on the panoramic. Draggable to slide the
-            cross-section along the arch. */}
         {screenData.csA && screenData.csB && screenData.csMid && (
           <g>
-            {/* Wide invisible hit area */}
             <line
               x1={screenData.csA[0]} y1={screenData.csA[1]}
               x2={screenData.csB[0]} y2={screenData.csB[1]}
-              stroke="transparent" strokeWidth={16}
-              style={{ pointerEvents: 'auto', cursor: 'move' }}
+              stroke="transparent" strokeWidth={CROSS_SECTION_HIT_WIDTH}
+              style={{ pointerEvents: 'stroke', cursor: 'move', touchAction: 'none' }}
               onPointerDown={handleCsPointerDown}
             />
-            {/* Visible line */}
             <line
               x1={screenData.csA[0]} y1={screenData.csA[1]}
               x2={screenData.csB[0]} y2={screenData.csB[1]}
               stroke="rgb(100,200,255)" strokeWidth={2}
               style={{ pointerEvents: 'none', filter: 'drop-shadow(0 0 3px rgba(100,200,255,0.7))' }}
             />
-            {/* Centre handle */}
             <circle
-              cx={screenData.csMid[0]} cy={screenData.csMid[1]} r={6}
+              cx={screenData.csMid[0]} cy={screenData.csMid[1]} r={CONTROL_POINT_HIT_RADIUS}
+              fill="transparent"
+              style={{ pointerEvents: 'all', cursor: 'move', touchAction: 'none' }}
+              onPointerDown={handleCsPointerDown}
+            />
+            <circle
+              cx={screenData.csMid[0]} cy={screenData.csMid[1]} r={CONTROL_POINT_RADIUS}
               fill={csDragging ? 'rgb(80,200,255)' : 'rgb(100,200,255)'}
               stroke="white" strokeWidth={1.5}
-              style={{ pointerEvents: 'auto', cursor: 'move' }}
-              onPointerDown={handleCsPointerDown}
+              style={{ pointerEvents: 'none' }}
             />
           </g>
         )}
 
-        {/* Control points */}
         {screenData.controlPts.map((p, i) => (
-          <circle
-            key={i}
-            cx={p[0]}
-            cy={p[1]}
-            r={7}
-            fill={dragIdx === i ? 'rgb(80,200,255)' : 'rgb(50,140,255)'}
-            stroke="white"
-            strokeWidth={2}
-            style={{ pointerEvents: 'auto', cursor: dragIdx === i ? 'grabbing' : 'grab' }}
-            onPointerDown={handlePointerDown(i)}
-          />
+          <g key={i}>
+            <circle
+              cx={p[0]}
+              cy={p[1]}
+              r={CONTROL_POINT_HIT_RADIUS}
+              fill="transparent"
+              style={{ pointerEvents: 'all', cursor: dragIdx === i ? 'grabbing' : 'grab', touchAction: 'none' }}
+              onPointerDown={handlePointerDown(i)}
+            />
+            <circle
+              cx={p[0]}
+              cy={p[1]}
+              r={CONTROL_POINT_RADIUS}
+              fill={dragIdx === i ? 'rgb(80,200,255)' : 'rgb(50,140,255)'}
+              stroke="white"
+              strokeWidth={2}
+              style={{ pointerEvents: 'none' }}
+            />
+          </g>
         ))}
       </svg>
     </div>
