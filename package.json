@@ -71,6 +71,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "prepare": "npm run build:lib",
     "prepublishOnly": "npm run build:lib"
   },
   "peerDependencies": {
