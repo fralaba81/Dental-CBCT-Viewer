@@ -1,5 +1,5 @@
 import { getRenderingEngine, utilities } from '@cornerstonejs/core';
-import { RENDERING_ENGINE_ID, VP_AXIAL, VP_CORONAL, VP_SAGITTAL } from '@/core/constants';
+import { RENDERING_ENGINE_ID, VP_AXIAL, VP_CORONAL, VP_SAGITTAL, VP_3D } from '@/core/constants';
 import type { ViewerViewport } from '@/types/viewerApi';
 
 type MprViewport = 'axial' | 'coronal' | 'sagittal';
@@ -46,15 +46,26 @@ export function resetViewerViewport(viewport?: ViewerViewport) {
   const engine = getRenderingEngine(RENDERING_ENGINE_ID);
   if (!engine) return;
 
-  const ids = viewport && viewport in MPR_IDS
-    ? [MPR_IDS[viewport as MprViewport]]
-    : [VP_AXIAL, VP_CORONAL, VP_SAGITTAL];
+  let ids: string[];
+  if (viewport === '3d') {
+    ids = [VP_3D];
+  } else if (viewport && viewport in MPR_IDS) {
+    ids = [MPR_IDS[viewport as MprViewport]];
+  } else if (!viewport) {
+    ids = [VP_AXIAL, VP_CORONAL, VP_SAGITTAL, VP_3D];
+  } else {
+    // Panoramic and cross-section are canvas-derived views and do not expose a
+    // Cornerstone camera. Their frontend-specific reset remains a no-op here.
+    ids = [];
+  }
 
   ids.forEach((id) => {
     try {
       const vp = engine.getViewport(id) as any;
       if (!vp) return;
-      if (typeof vp.resetCamera === 'function') vp.resetCamera();
+      if (typeof vp.resetCamera === 'function') {
+        vp.resetCamera({ resetPan: true, resetZoom: true, resetToCenter: true });
+      }
       if (typeof vp.render === 'function') vp.render();
     } catch {
       // A viewport may not currently be mounted in the active layout.
