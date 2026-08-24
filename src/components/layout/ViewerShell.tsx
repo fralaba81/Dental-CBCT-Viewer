@@ -14,7 +14,7 @@ import { serializePlan, planFromObject } from '@/core/planIO';
 import { CS_TOOL_KEYS } from '@/core/annotationLayer';
 import { RENDERING_ENGINE_ID } from '@/core/constants';
 
-export function ViewerShell() {
+export function ViewerShell({ headless = false }: { headless?: boolean }) {
   const { state, dispatch } = useViewer();
   const { t } = useI18n();
   const measurementsRef = useRef(state.measurements);
@@ -24,7 +24,7 @@ export function ViewerShell() {
   const buildingVolumeRef = useRef(false);
   const [engineReady, setEngineReady] = useState(false);
 
-  // Create a shared rendering engine BEFORE children mount
+  // Create one shared rendering engine for the life of the loaded viewer.
   useEffect(() => {
     if (!state.isInitialized) return;
 
@@ -40,7 +40,6 @@ export function ViewerShell() {
     };
   }, [state.isInitialized]);
 
-  // Every completed Cornerstone measurement becomes its own layer
   useEffect(() => {
     const handler = (evt: Event) => {
       const ann = (evt as CustomEvent).detail?.annotation;
@@ -64,11 +63,9 @@ export function ViewerShell() {
     return () => eventTarget.removeEventListener(csToolsEnums.Events.ANNOTATION_COMPLETED, handler);
   }, [dispatch, t]);
 
-  // Build volume for MPR/3D views (always needed since default viewMode is AXIAL)
-  const needsVolume = true;
+  // Build the cached CBCT volume once. Layout changes reuse the same volumeId.
   useEffect(() => {
     if (
-      !needsVolume ||
       state.volumeId ||
       !state.activeSeriesUID ||
       !state.study ||
@@ -94,10 +91,9 @@ export function ViewerShell() {
         buildingVolumeRef.current = false;
         console.error('[DQ-DICOM] Volume creation failed:', err);
       });
-  }, [needsVolume, state.activeSeriesUID, state.study, state.volumeId, dispatch]);
+  }, [state.activeSeriesUID, state.study, state.volumeId, dispatch]);
 
-  // Crosshairs is the default tool once a study is loaded in a multi-view
-  // layout (needs the MPR viewports to exist first, hence the small delay).
+  // Crosshairs is the default tool once a study is loaded in a multi-view MPR layout.
   const crosshairInitRef = useRef<string | null>(null);
   useEffect(() => {
     if (!engineReady || !state.volumeId) return;
@@ -115,7 +111,6 @@ export function ViewerShell() {
   const studyUID = state.study?.studyInstanceUID ?? null;
   const restoredRef = useRef<string | null>(null);
 
-  // Restore the last autosaved plan once per study, only into a fresh plan
   useEffect(() => {
     if (!studyUID || restoredRef.current === studyUID) return;
     restoredRef.current = studyUID;
@@ -128,7 +123,6 @@ export function ViewerShell() {
     } catch { /* ignore corrupt autosave */ }
   }, [studyUID, state.implants.length, state.anatomy.length, state.measurements.length, dispatch]);
 
-  // Debounced autosave of the current plan
   useEffect(() => {
     if (!studyUID) return;
     const id = setTimeout(() => {
@@ -151,13 +145,13 @@ export function ViewerShell() {
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-gray-100 dark:bg-gray-900">
-      <LeftPanel />
-      {hasSeries && (
+      {!headless && <LeftPanel />}
+      {!headless && hasSeries && (
         <div className="w-56 bg-white border-r border-gray-300 dark:bg-gray-800 dark:border-gray-700 overflow-y-auto">
           <SeriesList />
         </div>
       )}
-      <div className="flex-1 relative overflow-hidden">
+      <div className="flex-1 relative overflow-hidden min-w-0 min-h-0">
         {engineReady ? (
           <ViewportGrid />
         ) : (
@@ -165,7 +159,7 @@ export function ViewerShell() {
             <div className="w-8 h-8 border-4 border-dental-400 border-t-transparent rounded-full animate-spin" />
           </div>
         )}
-        <RegistrationPanel />
+        {!headless && <RegistrationPanel />}
         {engineReady && <WindowLevelSync />}
       </div>
     </div>
