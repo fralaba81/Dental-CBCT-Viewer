@@ -4,6 +4,7 @@ import { setupTools, addViewportToToolGroup } from '@/core/toolManager';
 import { RENDERING_ENGINE_ID, VP_AXIAL, VP_SAGITTAL, VP_CORONAL } from '@/core/constants';
 import { emitViewerEvent } from '@/core/viewerEvents';
 import { resetViewerViewport } from '@/core/publicViewerController';
+import { saveViewportState, restoreViewportState } from '@/core/viewportStateRegistry';
 import { VIEW_LABEL_KEYS, type MPROrientation } from '@/types/dicom';
 import { useI18n } from '@/i18n/I18nContext';
 import { ViewportOverlay } from './ViewportOverlay';
@@ -90,10 +91,6 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
     };
     element.addEventListener(Enums.Events.VOLUME_NEW_IMAGE, onVolumeNewImage);
 
-    // Cornerstone's linked MPR crosshairs are camera-driven. CAMERA_MODIFIED
-    // therefore gives the host a lightweight signal that the anatomical
-    // reference/crosshair geometry changed. It can also fire for pan/zoom;
-    // consumers should treat it as a refresh signal rather than a clinical log.
     const onCameraModified = () => {
       emitViewerEvent('crosshairChanged', { viewport: apiViewport });
     };
@@ -109,6 +106,8 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
       resizeObserver.disconnect();
       if (enabledRef.current) {
         try {
+          const currentViewport = engine.getViewport(viewportId);
+          saveViewportState(viewportId, currentViewport);
           engine.disableElement(viewportId);
         } catch {
           // engine may already be destroyed
@@ -133,6 +132,7 @@ export function ViewportMPR({ orientation, volumeId }: ViewportMPRProps) {
 
         const viewport = engine!.getViewport(viewportId);
         if (viewport) {
+          restoreViewportState(viewportId, viewport);
           viewport.render();
           if ('getSliceIndex' in viewport) {
             const idx = (viewport as { getSliceIndex: () => number }).getSliceIndex();
