@@ -26,6 +26,7 @@ export default defineConfig({
 
     allowedHosts: [
       'dental-cbct-viewer-production.up.railway.app',
+      'independent-encouragement-production-abfb.up.railway.app',
     ],
 
     headers: {
