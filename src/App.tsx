@@ -61,29 +61,24 @@ function toMprViewport(viewport?: ViewerViewport): 'axial' | 'coronal' | 'sagitt
   return viewport === 'coronal' || viewport === 'sagittal' ? viewport : 'axial';
 }
 
-// ── Public component props / imperative handle ──────────────────
-
 export interface DicomViewerProps {
-  /** Optional patient identity shown in the report header. */
   patientId?: string;
   patientName?: string;
-  /** Load a saved plan (implants, anatomy, arch, settings…) on mount. */
   initialPlan?: PlanData;
-  /** Start in this layout ('1x1' | '1+3' | '2x2' | 'OPG2+1'). */
   initialLayout?: LayoutMode;
-  /** UI language ('en' | 'de' | 'es' | 'hu'). */
   lang?: string;
-  /** Called (debounced) whenever the plan changes — persist it host-side. */
   onPlanChange?: (plan: PlanData) => void;
-  /** Called whenever the implant list changes. */
   onImplantsChange?: (implants: ImplantData[]) => void;
-  /** Host integration callbacks for mobile/custom frontends. */
   callbacks?: ViewerApiCallbacks;
-  /** Extra class name on the root element. */
   className?: string;
-  /** Embed mode — the host owns page-level consent, so the built-in
-   *  disclaimer banner is suppressed. */
+  /** Host owns page-level consent; suppresses the built-in disclaimer. */
   embedded?: boolean;
+  /**
+   * Engine-only mode for a custom frontend. Hides the built-in top bar,
+   * landing page, side panels and modal chrome while keeping the real
+   * Cornerstone/vtk viewer and public ref API mounted.
+   */
+  headless?: boolean;
 }
 
 export interface DicomViewerHandle {
@@ -262,7 +257,6 @@ function ViewerApp({
     exportGuideStl: () => exportDrillGuideStl(stateRef.current).then((r) => r.ok),
   }), [dispatch, loadFiles, openSample, t, lang, buildPublicState, props.callbacks]);
 
-  // ── Host events ────────────────────────────────────────────
   useEffect(() => {
     const loaded = Boolean(state.study);
     if (loaded !== previousStudyRef.current) {
@@ -337,7 +331,14 @@ function ViewerApp({
     },
   ), [props.callbacks, buildPublicState]);
 
-  // ── Prop → state wiring ─────────────────────────────────────
+  useEffect(() => onViewerEvent<{ viewport: 'axial' | 'coronal' | 'sagittal' }>(
+    'crosshairChanged',
+    () => {
+      props.callbacks?.onCrosshairChanged?.();
+      props.callbacks?.onStateChange?.(buildPublicState());
+    },
+  ), [props.callbacks, buildPublicState]);
+
   const appliedInitial = useRef(false);
   useEffect(() => {
     if (appliedInitial.current || !state.isInitialized) return;
@@ -401,12 +402,14 @@ function ViewerApp({
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <div className="w-12 h-12 border-4 border-dental-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400">{t('app.initializing')}</p>
+          {!props.headless && <p className="text-gray-600 dark:text-gray-400">{t('app.initializing')}</p>}
         </div>
       </div>
     );
   } else if (state.error && !state.study) {
-    content = (
+    content = props.headless ? (
+      <div className="h-full w-full bg-black" />
+    ) : (
       <div className="flex items-center justify-center h-full">
         <div className="text-center max-w-md">
           <p className="text-red-500 dark:text-red-400 mb-4">{state.error}</p>
@@ -420,21 +423,21 @@ function ViewerApp({
       </div>
     );
   } else if (!state.study) {
-    content = <LandingPage />;
+    content = props.headless ? <div className="h-full w-full bg-black" /> : <LandingPage />;
   } else {
-    content = <ViewerShell />;
+    content = <ViewerShell headless={props.headless} />;
   }
 
   return (
     <div className={`dcv-root ${theme === 'dark' ? 'dark' : ''} ${props.className ?? ''} h-full w-full`}>
       <div className="flex flex-col h-full w-full overflow-hidden bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
-        <TopBar />
-        <div className="flex-1 overflow-hidden">{content}</div>
-        <SettingsPanel />
-        <PatientsPanel />
-        <IntroTour />
-        <HelpPanel />
-        {!props.embedded && <DisclaimerBanner />}
+        {!props.headless && <TopBar />}
+        <div className="flex-1 min-h-0 overflow-hidden">{content}</div>
+        {!props.headless && <SettingsPanel />}
+        {!props.headless && <PatientsPanel />}
+        {!props.headless && <IntroTour />}
+        {!props.headless && <HelpPanel />}
+        {!props.headless && !props.embedded && <DisclaimerBanner />}
       </div>
     </div>
   );
