@@ -1,8 +1,10 @@
 # Frontend API
 
-This document describes the host-facing API intended for a custom mobile/tablet frontend (for example a Bolt.new UI). The DICOM/Cornerstone/vtk engine remains inside `Dental-CBCT-Viewer`; the host controls it through a React ref and callbacks.
+This document describes the host-facing API intended for a custom mobile/tablet frontend such as Bolt.new. The DICOM/Cornerstone/vtk engine remains inside `Dental-CBCT-Viewer`; the host controls it through a React ref and callbacks.
 
-## Mount the viewer
+## Mount the viewer for a custom frontend
+
+Use `headless` when another application owns all visible navigation, buttons and patient chrome:
 
 ```tsx
 import { useRef } from 'react';
@@ -13,19 +15,27 @@ export function DentalScreen() {
   const viewerRef = useRef<DicomViewerHandle>(null);
 
   return (
-    <DicomViewer
-      ref={viewerRef}
-      embedded
-      lang="es"
-      callbacks={{
-        onStateChange: (state) => console.log(state),
-        onSliceChanged: (viewport, index, total) =>
-          console.log(viewport, index, total),
-      }}
-    />
+    <div className="viewer-host">
+      <DicomViewer
+        ref={viewerRef}
+        headless
+        embedded
+        lang="es"
+        callbacks={{
+          onStateChange: (state) => console.log(state),
+          onSliceChanged: (viewport, index, total) =>
+            console.log(viewport, index, total),
+          onCrosshairChanged: () => console.log('MPR geometry changed'),
+        }}
+      />
+    </div>
   );
 }
 ```
+
+`headless` hides the built-in landing page, top bar, left/series panels and internal modal chrome. The real Cornerstone/vtk viewports remain mounted. The host should give the component a non-zero width and height.
+
+Without `headless`, the original desktop UI remains available and backwards-compatible.
 
 ## Load / unload a local DICOM study
 
@@ -34,7 +44,7 @@ await viewerRef.current?.loadStudy(files);
 viewerRef.current?.unloadStudy();
 ```
 
-The current local-file flow remains supported. The API boundary is intentionally separate from the loader so a DICOMweb/Orthanc loader can be added later without changing the frontend control contract.
+The existing local-file flow remains supported. The API boundary is intentionally separate from the loader so a future DICOMweb/Orthanc loader can be added without changing the frontend control contract.
 
 ## Main dental modes
 
@@ -44,9 +54,9 @@ viewerRef.current?.setMainView('mpr');
 viewerRef.current?.setMainView('3d');
 ```
 
-`mpr` keeps the existing linked MPR + 3D engine alive. The mobile frontend can maximize any individual MPR plane when it wants a one-view experience.
+The same cached CBCT volume is reused while switching modes.
 
-## Maximize a viewport without reloading the study
+## Maximize a viewport
 
 ```ts
 viewerRef.current?.maximizeViewport('axial');
@@ -59,7 +69,7 @@ viewerRef.current?.maximizeViewport('3d');
 viewerRef.current?.restoreLayout();
 ```
 
-Maximization is independent from the underlying layout mode. The shared Cornerstone volume remains loaded.
+Maximization is independent from study loading. The cached volume is not rebuilt. MPR cameras are persisted across viewport remounts so slice/focal point/zoom/pan survive layout changes as far as the underlying Cornerstone camera supports them.
 
 ## MPR slice navigation
 
@@ -69,7 +79,9 @@ viewerRef.current?.nextSlice('axial');
 viewerRef.current?.previousSlice('axial');
 ```
 
-Valid MPR viewport names are `axial`, `coronal`, and `sagittal`. If omitted, the slice methods default to `axial`.
+Valid MPR viewport names are `axial`, `coronal`, and `sagittal`. If omitted, slice methods default to `axial`.
+
+The frontend can drive its own large mobile slider from `onSliceChanged` and `getViewerState()`.
 
 ## Panoramic arch workflow
 
@@ -78,7 +90,7 @@ viewerRef.current?.openArchEditor();
 viewerRef.current?.closeArchEditor();
 ```
 
-`openArchEditor()` switches to the existing dental panoramic layout and marks the arch editor as active for the host state.
+The existing dental arch mathematics are preserved. The axial arch editor now uses Pointer Events and separates visual marker size from touch hit size: control nodes keep a small visible radius but have an approximately 36 px diameter invisible finger target. The cross-section locator uses a 30 px invisible line target.
 
 ## Cross-sections
 
@@ -91,7 +103,9 @@ viewerRef.current?.nextCrossSection();
 viewerRef.current?.previousCrossSection();
 ```
 
-Internally the existing engine stores cross-section position as a continuous 0..1 value along the arch. `setCrossSection(index, count = 101)` is a frontend-friendly indexed adapter.
+Internally the engine stores position as a continuous 0..1 value along the dental arch. `setCrossSection(index, count = 101)` is a frontend-friendly indexed adapter.
+
+On touch devices the cross-section viewport also supports horizontal finger dragging to move along the arch. Desktop mouse dragging keeps the existing window/level behavior.
 
 ## Tools
 
@@ -103,16 +117,21 @@ viewerRef.current?.setActiveTool('zoom');
 viewerRef.current?.setActiveTool('length');
 ```
 
-Only existing Cornerstone tools are exposed; no clinical tools are faked.
+Only existing Cornerstone tools are exposed; no clinical tool is simulated.
+
+For the installed Cornerstone Tools 2.19.x engine, touch configuration is enabled for the Crosshairs tool with a larger mobile handle radius. One-finger interaction is assigned to the active tool. Two touch points are assigned to Cornerstone's `ZoomTool`, whose native pinch handler also pans while pinching. In 3D, one finger rotates and two fingers use the native pinch zoom/pan behavior.
 
 ## Reset / resize
 
 ```ts
 viewerRef.current?.resetView('axial');
+viewerRef.current?.resetView('3d');
 viewerRef.current?.resize();
 ```
 
-MPR viewports already use `ResizeObserver`; `resize()` is provided for host transitions/orientation changes that need an explicit engine resize.
+`resetView()` targets the requested Cornerstone camera. Panoramic/cross-section are canvas-derived views and therefore have no Cornerstone camera reset at engine level.
+
+MPR viewports use `ResizeObserver`; `resize()` remains available after host animations or orientation transitions.
 
 ## Read public state
 
@@ -139,39 +158,82 @@ The returned shape contains:
 
 ## Host callbacks
 
-Pass a `callbacks` object to `DicomViewer`:
-
-```ts
-callbacks={{
-  onStudyLoaded,
-  onStudyUnloaded,
-  onMainViewChanged,
-  onViewportMaximized,
-  onViewportRestored,
-  onSliceChanged,
-  onCrosshairChanged,
-  onArchChanged,
-  onCrossSectionChanged,
-  onToolChanged,
-  onLoadingProgress,
-  onError,
-  onStateChange,
-}}
+```tsx
+<DicomViewer
+  callbacks={{
+    onStudyLoaded,
+    onStudyUnloaded,
+    onMainViewChanged,
+    onViewportMaximized,
+    onViewportRestored,
+    onSliceChanged,
+    onCrosshairChanged,
+    onArchChanged,
+    onCrossSectionChanged,
+    onToolChanged,
+    onLoadingProgress,
+    onError,
+    onStateChange,
+  }}
+/>
 ```
 
-The first engine/frontend integration phase currently wires study, main-view, viewport-maximize/restore, slice, arch, cross-section, tool, loading, error, and aggregate-state events. `onCrosshairChanged` is reserved in the public contract for the touch/crosshair event bridge.
+`onCrosshairChanged` is emitted from linked MPR camera geometry changes. Cornerstone also emits camera changes for pan/zoom, so treat this callback as a UI refresh signal rather than an audit/clinical event.
 
-## Mobile integration rules
+For lower-level integrations the event bridge is also exported:
+
+```ts
+import { onViewerEvent } from 'dental-cbct-viewer';
+
+const off = onViewerEvent('crosshairChanged', () => {
+  // update host UI
+});
+
+off();
+```
+
+## Mobile gesture foundation
+
+The viewer reserves CBCT viewport surfaces for medical gestures using `touch-action: none`, `overscroll-behavior: contain` and Pointer Events where custom overlays are involved. This prevents Safari/Chrome page scrolling from stealing drags over the image while leaving the surrounding host application free to scroll.
+
+MPR currently provides:
+
+- one-finger active Cornerstone tool interaction;
+- mobile Crosshairs mode with enlarged handles;
+- two-finger native Cornerstone pinch zoom/pan;
+- wheel/host API slice navigation;
+- double-tap reset for MPR viewports;
+- Pointer Event support for mouse, touch and stylus.
+
+Dental panoramic editing provides:
+
+- large invisible touch targets around control nodes;
+- pointer capture while dragging;
+- large invisible target around the active cross-section line;
+- direct finger movement of the cross-section position along the arch.
+
+Cross-section viewing provides:
+
+- horizontal touch drag along the arch;
+- enlarged 30 px axial-Z drag target;
+- desktop W/L mouse behavior preserved.
+
+## Mobile integration rules for Bolt/new UI
 
 The host frontend should:
 
+- mount `<DicomViewer headless embedded />` inside the viewport area;
 - keep the viewer mounted while switching Panoramic / MPR / 3D;
-- use `maximizeViewport()` rather than unloading/remounting DICOM data;
-- keep overlays outside the Cornerstone interaction surface whenever possible;
-- not intercept pointer/touch events over the MPR/3D canvas;
-- call `resize()` after major animated container transitions if needed;
-- use `onSliceChanged` or `getViewerState()` to drive mobile slice labels/sliders.
+- call the ref API rather than importing internal Cornerstone stores;
+- use `maximizeViewport()` rather than unloading the study;
+- keep UI overlays outside the imaging surface whenever possible;
+- never place an invisible overlay over the canvas that intercepts gestures;
+- call `resize()` after large animated container transitions when needed;
+- use callbacks/state to drive labels, slice sliders and mobile bottom sheets;
+- keep patient/navigation UI outside the engine component.
 
-## Current touch foundation
+## Performance notes
 
-MPR interaction elements are marked with `touch-action: none` so browser page gestures do not steal CBCT manipulation. Cornerstone remains responsible for the actual clinical viewport interactions. Additional crosshair-specific mobile hit-area tuning belongs in the next engine phase and must preserve desktop behavior.
+The engine keeps one shared `RenderingEngine` per loaded viewer and one cached volume ID for the study. Layout and main-view changes reuse the cached volume rather than recreating the DICOM volume. MPR camera state is saved/restored across viewport layout transitions. No mobile quality mode currently reduces clinical resolution automatically.
+
+Actual iOS/Android performance must still be validated on physical phones with representative dental CBCT datasets; browser GPU/WebGL limits vary by device.
