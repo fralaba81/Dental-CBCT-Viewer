@@ -1,4 +1,5 @@
 import { useViewer } from '@/context/ViewerContext';
+import { useViewerControl } from '@/context/ViewerControlContext';
 import { normalizePanelViews, type ViewKey } from '@/types/dicom';
 import { Viewport2D } from './Viewport2D';
 import { ViewportMPR } from './ViewportMPR';
@@ -12,7 +13,41 @@ import { PanoramaChrome } from './PanoramaChrome';
 
 export function ViewportGrid() {
   const { state } = useViewer();
+  const { maximizedViewport } = useViewerControl();
   const vid = state.volumeId;
+
+  // Public/mobile API maximization is intentionally independent from the
+  // underlying layout mode. This preserves the current study/volume state and
+  // lets the host restore the previous layout without reloading DICOM data.
+  if (maximizedViewport && vid) {
+    if (maximizedViewport === '3d') {
+      return <Viewport3D volumeId={vid} />;
+    }
+    if (maximizedViewport === 'panoramic') {
+      return (
+        <div className="relative w-full h-full">
+          <ViewportPanoramic volumeId={vid} showCrossSectionLine />
+          <PanoramaChrome />
+        </div>
+      );
+    }
+    if (maximizedViewport === 'crossSection') {
+      return <ViewportCrossSection volumeId={vid} />;
+    }
+
+    const orientation = maximizedViewport === 'axial'
+      ? 'AXIAL'
+      : maximizedViewport === 'coronal'
+        ? 'CORONAL'
+        : 'SAGITTAL';
+
+    return (
+      <div className="relative w-full h-full">
+        <ViewportMPR orientation={orientation} volumeId={vid} />
+        {orientation === 'AXIAL' && <ImplantAxialOverlay />}
+      </div>
+    );
+  }
 
   // 1×1 mode: the selected view + on-image Tools / View boxes; the axial view
   // also shows the implant / anatomy markers so they are visible here too.
