@@ -153,7 +153,7 @@ export function ViewerShell({ headless = false }: { headless?: boolean }) {
       )}
       <div className="flex-1 relative overflow-hidden min-w-0 min-h-0">
         {engineReady ? (
-          <ViewportGrid />
+          <ViewportGrid headless={headless} />
         ) : (
           <div className="flex items-center justify-center h-full">
             <div className="w-8 h-8 border-4 border-dental-400 border-t-transparent rounded-full animate-spin" />
