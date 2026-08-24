@@ -21,9 +21,6 @@ import {
 import { TOOL_GROUP_ID, TOOL_GROUP_3D_ID } from './constants';
 import type { ViewportTool } from '@/types/dicom';
 
-// Reference-line colors: a clean two-colour scheme (yellow for the axial plane,
-// blue for the sagittal/coronal planes) instead of the near-white default.
-// Matched by substring so it is robust to any id prefix/suffix.
 const CROSSHAIR_YELLOW = 'rgb(255, 214, 60)';
 const CROSSHAIR_BLUE = 'rgb(74, 163, 255)';
 function referenceLineColor(refVpId: string): string {
@@ -35,7 +32,6 @@ let toolGroupCreated = false;
 export function setupTools(): void {
   if (toolGroupCreated) return;
 
-  // Register all tools globally
   addTool(WindowLevelTool);
   addTool(PanTool);
   addTool(ZoomTool);
@@ -52,7 +48,6 @@ export function setupTools(): void {
   addTool(ProbeTool);
   addTool(CrosshairsTool);
 
-  // --- 2D / MPR tool group ---
   const toolGroup = ToolGroupManager.createToolGroup(TOOL_GROUP_ID);
   if (!toolGroup) return;
 
@@ -70,41 +65,49 @@ export function setupTools(): void {
   toolGroup.addTool(ArrowAnnotateTool.toolName);
   toolGroup.addTool(ProbeTool.toolName);
   toolGroup.addTool(CrosshairsTool.toolName, {
-    // CrosshairsTool calls this with a SINGLE arg — the id of the viewport whose
-    // plane the line represents (not two args, as it may look).
     getReferenceLineColor: (vpId: string) => referenceLineColor(vpId),
     getReferenceLineControllable: () => true,
     getReferenceLineDraggableRotatable: () => true,
     getReferenceLineSlabThicknessControlsOn: () => false,
+    // Cornerstone's CrosshairsTool has a dedicated mobile rendering mode.
+    // It increases the effective handle target while keeping the reference
+    // lines visually thin enough for diagnostic viewing.
+    mobile: {
+      enabled: true,
+      opacity: 0.9,
+      handleRadius: 12,
+    },
   });
 
   toolGroup.setToolActive(StackScrollTool.toolName, {
     bindings: [{ mouseButton: csToolsEnums.MouseBindings.Wheel }],
   });
 
-  // Default: left click = Window/Level
   setActiveTool('windowLevel');
 
-  // --- 3D tool group ---
   const toolGroup3D = ToolGroupManager.createToolGroup(TOOL_GROUP_3D_ID);
   if (toolGroup3D) {
     toolGroup3D.addTool(TrackballRotateTool.toolName);
     toolGroup3D.addTool(PanTool.toolName);
     toolGroup3D.addTool(ZoomTool.toolName);
 
-    // Left click = rotate
     toolGroup3D.setToolActive(TrackballRotateTool.toolName, {
-      bindings: [{ mouseButton: csToolsEnums.MouseBindings.Primary }],
+      bindings: [
+        { mouseButton: csToolsEnums.MouseBindings.Primary },
+        { numTouchPoints: 1 },
+      ],
     });
-    // Middle click = pan
     toolGroup3D.setToolActive(PanTool.toolName, {
-      bindings: [{ mouseButton: csToolsEnums.MouseBindings.Auxiliary }],
+      bindings: [
+        { mouseButton: csToolsEnums.MouseBindings.Auxiliary },
+        { numTouchPoints: 3 },
+      ],
     });
-    // Right click or mouse wheel = zoom (so the 3D view is scrollable/zoomable)
     toolGroup3D.setToolActive(ZoomTool.toolName, {
       bindings: [
         { mouseButton: csToolsEnums.MouseBindings.Secondary },
         { mouseButton: csToolsEnums.MouseBindings.Wheel },
+        { numTouchPoints: 2 },
       ],
     });
   }
@@ -135,7 +138,6 @@ export function setActiveTool(tool: ViewportTool): void {
   const toolGroup = ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
   if (!toolGroup) return;
 
-  // Deactivate all primary-button tools (crosshairs → disabled to avoid warning)
   for (const t of ALL_PRIMARY_TOOLS) {
     if (t === CrosshairsTool.toolName) {
       toolGroup.setToolDisabled(t);
@@ -147,7 +149,6 @@ export function setActiveTool(tool: ViewportTool): void {
   const csToolName = TOOL_NAME_MAP[tool];
   if (!csToolName) return;
 
-  // CrosshairsTool requires multiple viewports — skip activation if not enough
   if (tool === 'crosshairs') {
     const vpIds = toolGroup.getViewportIds();
     if (vpIds.length < 2) {
@@ -156,21 +157,26 @@ export function setActiveTool(tool: ViewportTool): void {
     }
   }
 
+  // Primary mouse and one-finger touch execute the currently selected tool.
+  // Pinch zoom remains globally reachable with two touch points below.
   toolGroup.setToolActive(csToolName, {
-    bindings: [{ mouseButton: csToolsEnums.MouseBindings.Primary }],
+    bindings: [
+      { mouseButton: csToolsEnums.MouseBindings.Primary },
+      { numTouchPoints: 1 },
+    ],
   });
 
-  // Middle click = Pan (always active)
   toolGroup.setToolActive(PanTool.toolName, {
     bindings: [{ mouseButton: csToolsEnums.MouseBindings.Auxiliary }],
   });
 
-  // Right click = Zoom (always active)
   toolGroup.setToolActive(ZoomTool.toolName, {
-    bindings: [{ mouseButton: csToolsEnums.MouseBindings.Secondary }],
+    bindings: [
+      { mouseButton: csToolsEnums.MouseBindings.Secondary },
+      { numTouchPoints: 2 },
+    ],
   });
 
-  // Mouse wheel = Scroll through slices (always active)
   toolGroup.setToolActive(StackScrollTool.toolName, {
     bindings: [{ mouseButton: csToolsEnums.MouseBindings.Wheel }],
   });
